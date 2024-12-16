@@ -1,0 +1,5 @@
+client/*.o
+server/*.o
+utils/*.o
+client/main
+server/main
