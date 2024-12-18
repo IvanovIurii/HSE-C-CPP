@@ -4,26 +4,75 @@
 #include <linux/fs.h>
 #include <asm/uaccess.h>
 #include <linux/device.h>
+#include <linux/jiffies.h>
+#include <linux/mutex.h>
 
 MODULE_DESCRIPTION("Kernel module");
 MODULE_AUTHOR("iurii.ivanov");
 MODULE_LICENSE("GPL");
 
-#define BUFFER_SIZE = 2
+#define BUFFER_SIZE 2
+#define P_POOL 3
 
 static int major_number;
 static struct class *my_class;
 static struct device *my_device;
 
-static int signal_num = SIGKILL; // default signal to send via kill_process
-static int timeout = 10;         // default timeout is seconds
+static int signal_num = SIGKILL; // default signal to send via kill_process; todo: make it a parameter
+static int timeout = 10;         // default timeout is seconds; todo: parameter
 
-// todo: add data structure task_struct to save process info
-// todo: kernel tracing mechanisms?
+DEFINE_MUTEX(my_device_mutex);
+
+struct process_info
+{
+    pid_t pid;
+    unsigned long start; // jiffies
+};
+
+static struct process_info processes[P_POOL]; // todo: implement connection pool
 
 static int device_open(struct inode *inode, struct file *file)
 {
-    printk(KERN_INFO "Device opened!\n");
+    // unsigned long start = jiffies;
+    pid_t pid = current->pid;
+    printk(KERN_INFO "Device opened by process: %ld\n", (long)pid);
+
+    // todo: extract as a function
+    struct process_info *array = processes;
+
+    mutex_lock(&my_device_mutex);
+
+    int i;
+    int count;
+    for (i = 0; i < P_POOL; i++)
+    {
+        if (array[i].pid == 0)
+        {
+            array[i].pid = pid;
+            array[i].start = jiffies;
+            break;
+        }
+        count++;
+
+        if (count == P_POOL)
+        {
+            printk(KERN_ERR "Connction refused. Try after timeout\n");
+            return -EAGAIN;
+        }
+    }
+
+    mutex_unlock(&my_device_mutex);
+
+    for (i = 0; i < P_POOL; i++)
+    {
+        if (processes[i].pid != 0)
+        {
+            printk(KERN_INFO "Process in list: %ld\n", (long)processes[i].pid);
+        }
+    }
+
+    // long end = jiffies;
+    // printk(KERN_INFO "Time elapsed: %ld\n", jiffies_to_msecs(end - start) / 1000); // 3 sec
 
     return 0;
 }
