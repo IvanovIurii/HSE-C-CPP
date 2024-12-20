@@ -5,3 +5,4 @@ modules.order
 *.o
 *.mod
 *.mod.*
+test
