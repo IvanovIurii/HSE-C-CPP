@@ -6,7 +6,7 @@
 
 int main()
 {
-    int fd = open("/dev/my_device", O_RDONLY);
+    int fd = open("/dev/my_device", O_RDWR);
     if (fd < 0)
     {
         perror("open");
@@ -15,11 +15,10 @@ int main()
 
     std::string key;
 
-    // todo: if not exit, send a message
-    // todo:
+    // todo: send to a device one by one
+    // if message is PING -> just read and return PONG
     std::cout << "PRESS ANY KEY...";
     std::getline(std::cin, key);
-    std::cout << "Hello, " << key << "!\n";
 
     close(fd);
     return 0;

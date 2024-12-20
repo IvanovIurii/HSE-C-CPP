@@ -1,4 +1,3 @@
-// #define _POSIX_C_SOURCE
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -25,9 +24,6 @@ static int major_number;
 static struct class *my_class;
 static struct device *my_device;
 
-static int signal_num = SIGKILL; // todo: should be a map of supported signals
-static int timeout = 10;         // timeout is seconds
-
 struct process_info
 {
     pid_t pid;
@@ -36,8 +32,6 @@ struct process_info
 
 static struct process_info processes[P_POOL];
 static struct task_struct *kthread;
-
-int watchdog_function(void *arg);
 
 static int device_init(void);
 static int device_open(struct inode *inode, struct file *file);
@@ -53,6 +47,19 @@ static struct file_operations fops = {
     .read = device_read,
     .write = device_write,
 };
+
+int watchdog_function(void *arg);
+bool is_supported(int signal);
+void update_start_timestamp(void);
+
+static int signal = SIGALRM;
+static int timeout = 30;
+
+module_param(timeout, int, S_IRUGO);
+MODULE_PARM_DESC(timeout, "Timeout value in seconds");
+
+module_param(signal, int, S_IRUGO);
+MODULE_PARM_DESC(debug, "Signal number");
 
 DEFINE_MUTEX(my_device_mutex);
 
@@ -77,44 +84,57 @@ static int device_open(struct inode *inode, struct file *file)
 
         if (count == P_POOL)
         {
-            printk(KERN_ERR "Connction refused. Try after timeout\n");
+            printk(KERN_INFO "Connction refused. Try again after timeout\n");
             return -EAGAIN;
         }
     }
 
     mutex_unlock(&my_device_mutex);
 
-    // TODO: ioctl get list of processes
-    // for (i = 0; i < P_POOL; i++)
-    // {
-    //     if (processes[i].pid != 0) // hm, maybe there is no need in array*
-    //     {
-    //         printk(KERN_INFO "Process in list: %ld\n", (long)processes[i].pid);
-    //     }
-    // }
-
     return 0;
 }
 
 static int device_release(struct inode *inode, struct file *file)
 {
-    // when finish writing and process releases FD
-    printk(KERN_INFO "Device has been released \n");
+    int i;
+    pid_t pid = current->pid;
+
+    mutex_lock(&my_device_mutex);
+
+    for (i = 0; i < P_POOL; i++)
+    {
+        if (processes[i].pid == pid)
+        {
+            processes[i].pid = 0;
+            processes[i].start = 0;
+
+            printk(KERN_INFO "Device has been released for the process: %ld\n", (long)pid);
+        }
+    }
+
+    mutex_unlock(&my_device_mutex);
 
     return 0;
 }
 
-static ssize_t device_read(struct file *file, char __user *buf, size_t count, loff_t *offset) // todo: user???
+static ssize_t device_read(struct file *file, char __user *buf, size_t count, loff_t *offset)
 {
-    // TODO: read logic here
-    return 0;
+    printk(KERN_INFO "Updating process start timestamp on READ");
+    update_start_timestamp();
+
+    char *message = "PONG";
+    if (copy_to_user(buf, message, strlen(message)))
+    {
+        return -EFAULT;
+    }
+
+    return count;
 }
 
 static ssize_t device_write(struct file *file, const char __user *buf, size_t count, loff_t *offset)
 {
-    mutex_lock(&my_device_mutex);
-
-    // TODO: add check if the process is capable of writing
+    printk(KERN_INFO "Updating process start timestamp on WRITE");
+    update_start_timestamp();
 
     char buffer[BUFFER_SIZE];
     if (count - 1 > BUFFER_SIZE)
@@ -130,8 +150,6 @@ static ssize_t device_write(struct file *file, const char __user *buf, size_t co
 
     printk(KERN_INFO "WRITE: %s", buffer);
 
-    mutex_unlock(&my_device_mutex);
-
     return count;
 }
 
@@ -140,14 +158,20 @@ static int device_init(void)
     major_number = register_chrdev(0, DEVICE_NAME, &fops);
     if (major_number < 0)
     {
-        printk(KERN_ALERT "Device registration failed\n");
+        printk(KERN_ERR "Device registration failed\n");
         return major_number;
     }
 
     my_class = class_create(THIS_MODULE, CLASS_NAME);
     my_device = device_create(my_class, NULL, MKDEV(major_number, 0), NULL, DEVICE_NAME);
-
+    if (IS_ERR(my_device))
+    {
+        printk(KERN_ERR "Cannot create device\n");
+        return 1;
+    }
     printk(KERN_INFO "Device registered with the major number %d\n", major_number);
+    printk(KERN_INFO "Signal: %d\n", signal);
+    printk(KERN_INFO "Timeout: %d\n", timeout);
 
     kthread = kthread_run(watchdog_function, NULL, "my_device_thread");
     if (IS_ERR(kthread))
@@ -171,30 +195,34 @@ int watchdog_function(void *arg)
             unsigned long elapsed_time_sec = jiffies_to_msecs(jiffies - processes[i].start) / 1000;
             if (processes[i].pid != 0 && elapsed_time_sec >= timeout)
             {
-                printk(KERN_INFO "Process %ld reached an idle timeout, sending a signal %d\n", (long)processes[i].pid, signal_num);
+                printk(KERN_INFO "Process %ld reached an idle timeout, sending a signal %d\n", (long)processes[i].pid, signal);
 
-                if (kill_pid(find_vpid(processes[i].pid), signal_num, 1) < 0)
+                if (kill_pid(find_vpid(processes[i].pid), signal, 1) < 0)
                 {
-                    printk(KERN_ERR "Failed to send a signal %d to a process %ld\n", signal_num, processes[i].pid);
-                }
-                else
-                {
-                    if (signal_num == SIGKILL)
-                    {
-                        long pid = (long)processes[i].pid;
-
-                        mutex_lock(&my_device_mutex);
-                        processes[i].pid = 0;
-                        processes[i].start = 0;
-                        mutex_unlock(&my_device_mutex);
-
-                        printk(KERN_INFO "Process %ld was removed from the pool", pid);
-                    }
+                    printk(KERN_ERR "Failed to send a signal %d to a process %ld\n", signal, (long)processes[i].pid);
                 }
             }
         }
     }
     return 0;
+}
+
+void update_start_timestamp()
+{
+    int i;
+    pid_t pid = current->pid;
+
+    mutex_lock(&my_device_mutex);
+
+    for (i = 0; i < P_POOL; i++)
+    {
+        if (processes[i].pid == pid)
+        {
+            processes[i].start = jiffies;
+        }
+    }
+
+    mutex_unlock(&my_device_mutex);
 }
 
 static void device_exit(void)
