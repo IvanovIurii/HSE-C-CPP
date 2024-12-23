@@ -5,6 +5,8 @@
 #include <netinet/in.h>
 #include "socketutils.h"
 
+#define BUFFER_SIZE 4096
+
 int main(int argc, char *argv[])
 {
     // todo: add args validation
@@ -36,10 +38,9 @@ int main(int argc, char *argv[])
         // todo: handle errors
         send(socketFd, command.c_str(), command.length(), 0);
 
-        // todo: define SIZE
-        char buffer[4096];
+        char buffer[BUFFER_SIZE];
         // todo: handle errors
-        ssize_t receivedBytesSize = recv(socketFd, buffer, 4096, 0);
+        ssize_t receivedBytesSize = recv(socketFd, buffer, BUFFER_SIZE, 0);
         buffer[receivedBytesSize] = 0;
 
         std::cout << buffer << std::endl;
