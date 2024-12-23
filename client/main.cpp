@@ -9,12 +9,15 @@
 
 int main(int argc, char *argv[])
 {
-    // todo: add args validation
-    // todo: add usage
+    if (argc < 2)
+    {
+        std::cout << "Port is not provided!" << std::endl;
+        exit(EXIT_FAILURE);
+    }
     char *port = argv[1];
 
     int socketFd = createTCPIPv4Socket();
-    struct sockaddr_in address = createIPv4Address("", atoi(port)); // todo: add IP address argument
+    struct sockaddr_in address = createIPv4Address("", atoi(port)); // on localhost
 
     int result = connect(socketFd, (struct sockaddr *)&address, sizeof(address));
     if (result < 0)
@@ -35,13 +38,27 @@ int main(int argc, char *argv[])
             break;
         }
 
-        // todo: handle errors
-        send(socketFd, command.c_str(), command.length(), 0);
+        ssize_t bytes_sent = send(socketFd, command.c_str(), command.length(), 0);
+        if (bytes_sent == -1)
+        {
+            perror("Something went wrong on sent...");
+            continue;
+        }
 
         char buffer[BUFFER_SIZE];
-        // todo: handle errors
-        ssize_t receivedBytesSize = recv(socketFd, buffer, BUFFER_SIZE, 0);
-        buffer[receivedBytesSize] = 0;
+        ssize_t bytes_received = recv(socketFd, buffer, BUFFER_SIZE, 0);
+        if (bytes_received == -1)
+        {
+            perror("Something went wrong on receive...");
+            continue;
+        }
+        else if (bytes_received == 0)
+        {
+            std::cerr << "Connection closed by server" << std::endl;
+            close(socketFd);
+            exit(EXIT_FAILURE);
+        }
+        buffer[bytes_received] = 0;
 
         std::cout << buffer << std::endl;
     }

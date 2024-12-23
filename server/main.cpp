@@ -88,7 +88,7 @@ void receiveAndAndHandleCommand(int clientSocketFd)
         }
         if (receivedBytesSize == 0)
         {
-            std::cout << "Connection closed" << std::endl;
+            std::cout << "Connection closed" << std::endl; // by client from port
             break;
         }
     }
