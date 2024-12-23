@@ -3,3 +3,4 @@ server/*.o
 utils/*.o
 client/main
 server/main
+.vscode/

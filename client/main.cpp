@@ -7,11 +7,12 @@
 
 int main(int argc, char *argv[])
 {
-    // add args validation
+    // todo: add args validation
+    // todo: add usage
     char *port = argv[1];
 
     int socketFd = createTCPIPv4Socket();
-    struct sockaddr_in address = createIPv4Address("", atoi(port)); // this is just empty IP, treated as ANY
+    struct sockaddr_in address = createIPv4Address("", atoi(port)); // todo: add IP address argument
 
     int result = connect(socketFd, (struct sockaddr *)&address, sizeof(address));
     if (result < 0)
@@ -20,23 +21,28 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    std::cout << "What is your name?" << std::endl;
-    std::string name;
-    getline(std::cin, name);
-
-    std::cout << "You can chat now..." << std::endl;
+    std::cout << "Type a command to execute... Or exit" << std::endl;
     while (true)
     {
-        std::cout << "YOU: ";
+        std::cout << "COMMAND: ";
+        std::string command;
+        getline(std::cin, command);
 
-        std::string message;
-        getline(std::cin, message);
-        std::string resultMessage = name + ": " + message;
+        if (command == "exit")
+        {
+            break;
+        }
 
-        std::cout << resultMessage << std::endl;
-        std::cout << resultMessage.length() << std::endl;
+        // todo: handle errors
+        send(socketFd, command.c_str(), command.length(), 0);
 
-        send(socketFd, resultMessage.c_str(), resultMessage.length(), 0);
+        // todo: define SIZE
+        char buffer[4096];
+        // todo: handle errors
+        ssize_t receivedBytesSize = recv(socketFd, buffer, 4096, 0);
+        buffer[receivedBytesSize] = 0;
+
+        std::cout << buffer << std::endl;
     }
 
     close(socketFd);
