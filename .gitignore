@@ -2,5 +2,7 @@ client/*.o
 server/*.o
 utils/*.o
 client/main
+client/client
 server/main
+server/server
 .vscode/
