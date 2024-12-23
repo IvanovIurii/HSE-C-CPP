@@ -2,32 +2,34 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
-#include "socketutils.h"
 #include <signal.h>
 #include <thread>
+#include "socketutils.h"
 
-#define TIMEOUT_SECONDS 50 // make a parameter
+#define BUFFER_SIZE 4096
+
+#define TIMEOUT_SECONDS 10
+#define MAX_CONNECTIONS 5
+#define PORT 9999
 
 struct AcceptedSocket
 {
     int acceptedSocketFd;
     struct sockaddr_in address;
-    int error;
-    bool success;
 };
 
 struct AcceptedSocket acceptIncomingConnection(int serverSocketFd);
 std::vector<std::string> split(const std::string &target, char c);
-void handle_command(std::string command, int clientSocketFd);
-// todo: rearrange
+
+void handleCommand(char buffer[], int clientSocketFd);
 void receiveAndAndHandleCommand(int clientSocketFd);
-void acceptConnectionAndReceiveAndHandleCommand(int serverSocketFd);
 void receiveAndAndHandleCommandOnThread(int clientSocketFd);
+void execute_command(std::string command);
 
 int main()
 {
     int socketFd = createTCPIPv4Socket();
-    struct sockaddr_in address = createIPv4Address("", 9999);
+    struct sockaddr_in address = createIPv4Address("", PORT);
     int result = bind(socketFd, (const sockaddr *)&address, sizeof(address));
     if (result < 0)
     {
@@ -35,8 +37,7 @@ int main()
         exit(EXIT_FAILURE);
     }
 
-    // queue up to 5 connection
-    if (listen(socketFd, 5) < 0) // todo: test when there are more connections, is the next one is waiting or error?
+    if (listen(socketFd, MAX_CONNECTIONS) < 0)
     {
         perror("Failed to start listenening");
         exit(EXIT_FAILURE);
@@ -44,28 +45,14 @@ int main()
 
     while (true)
     {
-        // this one is blocking
         struct AcceptedSocket clientSocket = acceptIncomingConnection(socketFd);
-        std::cout << "New connection from: " << std::endl;
-        std::cout << clientSocket.address.sin_addr.s_addr << std::endl;
-        std::cout << clientSocket.address.sin_port << std::endl;
+        std::cout << "New connection from port: " << clientSocket.address.sin_port << std::endl;
 
         receiveAndAndHandleCommandOnThread(clientSocket.acceptedSocketFd);
     }
 
-    // shutdown(socketFd, SHUT_RDWR); // how can we break the loop above?
-
-    // todo: propagate a real return code here (1 in case of error)
+    shutdown(socketFd, SHUT_RDWR);
     return 0;
-}
-
-void acceptConnectionAndReceiveAndHandleCommand(int serverSocketFd)
-{
-    while (true)
-    {
-        struct AcceptedSocket clientSocket = acceptIncomingConnection(serverSocketFd); // this one is blocking
-        receiveAndAndHandleCommandOnThread(clientSocket.acceptedSocketFd);
-    }
 }
 
 void receiveAndAndHandleCommandOnThread(int clientSocketFd)
@@ -76,19 +63,18 @@ void receiveAndAndHandleCommandOnThread(int clientSocketFd)
 
 void receiveAndAndHandleCommand(int clientSocketFd)
 {
-    char buffer[1024];
+    char buffer[BUFFER_SIZE];
     while (true)
     {
-        int receivedBytesSize = recv(clientSocketFd, buffer, 1024, 0);
+        int receivedBytesSize = recv(clientSocketFd, buffer, BUFFER_SIZE, 0);
         if (receivedBytesSize > 0)
         {
             buffer[receivedBytesSize] = 0;
-            std::string command(buffer); // todo: send just a buffer and convert inside the function
-            handle_command(command, clientSocketFd);
+            handleCommand(buffer, clientSocketFd);
         }
         if (receivedBytesSize == 0)
         {
-            std::cout << "Connection closed" << std::endl; // by client from port
+            std::cout << "Connection closed by client" << std::endl;
             break;
         }
     }
@@ -97,9 +83,10 @@ void receiveAndAndHandleCommand(int clientSocketFd)
     close(clientSocketFd);
 }
 
-// todo: refactor
-void handle_command(std::string command, int response_socket)
+void handleCommand(char buffer[], int response_socket)
 {
+    std::string command(buffer);
+
     int pfd[2];
     pipe(pfd);
 
@@ -113,92 +100,79 @@ void handle_command(std::string command, int response_socket)
         dup2(pfd[1], STDOUT_FILENO);
         dup2(pfd[1], STDERR_FILENO);
 
-        // todo: extract as fun and move up
-        auto args = split(command, ' '); // todo: use auto
-        char *argv[args.size() + 1];
+        execute_command(command);
 
-        int i;
-        for (i = 0; i < args.size(); i++)
-        {
-            char *str = (char *)args[i].c_str();
-            if (strlen(str) > 0)
-            {
-                argv[i] = str;
-            }
-        }
-        argv[i] = NULL; // null terminator
-
-        execvp(argv[0], argv); // todo add timeout on the execution
         close(pfd[1]);
-        // fflush(stdout);
     }
-    close(pfd[1]); // because we only read from pipe, but do not write into
+    close(pfd[1]); // because we only read from pipe
 
     int status;
     pid_t wait_pid;
+    std::string result;
 
     wait_pid = waitpid(pid, &status, 0);
     if (WIFSIGNALED(status))
     {
         std::cout << "Command execution reached timeout: " << TIMEOUT_SECONDS << " sec" << std::endl;
         std::cout << "Child process was terminated by signal: " << WTERMSIG(status) << std::endl;
-    }
 
-    std::string long_string; // todo: rename to result
-
-    // todo: put in the same block
-    if (WIFSIGNALED(status))
-    {
-        long_string = "Command execution timeout";
-        send(response_socket, long_string.c_str(), long_string.length(), 0);
+        result = "Command execution timeout";
+        send(response_socket, result.c_str(), result.length(), 0);
         return;
     }
 
-    char foo[4096];
+    char read_buffer[BUFFER_SIZE];
     ssize_t bytes_read;
 
-    while ((bytes_read = read(pfd[0], foo, 4096)) > 0)
+    while ((bytes_read = read(pfd[0], read_buffer, BUFFER_SIZE)) > 0)
     {
-        long_string.append(foo, bytes_read);
-        foo[bytes_read] = 0;
+        result.append(read_buffer, bytes_read);
+        read_buffer[bytes_read] = 0;
     }
 
     close(pfd[0]);
 
-    std::cout << long_string << std::endl;
+    std::cout << result << std::endl;
 
-    // send back via socket
-    send(response_socket, long_string.c_str(), long_string.length(), 0);
-    // todo: handle errors
+    size_t bytes_sent = send(response_socket, result.c_str(), result.length(), 0);
+    if (bytes_sent == -1)
+    {
+        perror("Something went wrong on sent...");
+    }
 }
 
-// todo: refactor
 struct AcceptedSocket acceptIncomingConnection(int serverSocketFd)
 {
     struct sockaddr_in clientAddress;
     int clientAddressSize = sizeof(sockaddr_in);
-    // blocking call
+    // blocking
     int clientSocketFd = accept(serverSocketFd, (sockaddr *)&clientAddress, (socklen_t *)&clientAddressSize);
 
     struct AcceptedSocket acceptedSocket;
-    if (clientSocketFd < 0)
-    {
-        acceptedSocket.error = 1;
-        acceptedSocket.success = false;
-    }
-    else
-    {
-        acceptedSocket.error = 0;
-        acceptedSocket.success = true;
-    }
-
     acceptedSocket.acceptedSocketFd = clientSocketFd;
     acceptedSocket.address = clientAddress;
 
     return acceptedSocket;
 }
 
-// todo: rename to split by space and make lambda out of it, because it is used only in one place
+void execute_command(std::string command)
+{
+    auto args = split(command, ' ');
+    char *argv[args.size() + 1];
+
+    for (int i = 0; i < args.size(); i++)
+    {
+        char *str = (char *)args[i].c_str();
+        if (strlen(str) > 0)
+        {
+            argv[i] = str;
+        }
+    }
+    argv[args.size()] = NULL;
+
+    execvp(argv[0], argv);
+}
+
 std::vector<std::string> split(const std::string &target, char c)
 {
     std::string temp;
