@@ -13,6 +13,8 @@
 
 #define CATS_AMOUNT 12
 #define BASE_DIR "./kotichi/"
+#define ARCHIVE_NAME "kotichi.zip"
+
 #define ENDPOINT_URL "http://localhost:8080/cat"
 
 namespace fs = std::filesystem;
@@ -29,7 +31,7 @@ const std::vector<FileSignature> signatures = {
     // image/plain or text ignored
 };
 
-static std::set<int> mySet;
+static std::set<int> cats_hashes_set;
 
 std::string getMimeType(std::string text)
 {
@@ -41,7 +43,7 @@ std::string getMimeType(std::string text)
     {
         if (strcmp(buffer, (const char *)sig.signature) == 0)
         {
-            // todo: use enums
+            // todo: use enums + switch case
             if (sig.mime_type == "image/jpeg")
                 return "jpeg";
             if (sig.mime_type == "image/png")
@@ -52,97 +54,123 @@ std::string getMimeType(std::string text)
     return "unknown";
 }
 
-// todo: should return string path of the file
-int downloadImage(std::string name)
+bool isDuplicate(std::string data)
+{
+    std::hash<std::string> hash_fn;
+    size_t hash_value = hash_fn(data);
+
+    // todo: here probably we have to sync because of critical section
+    if (cats_hashes_set.find(hash_value) == cats_hashes_set.end())
+    {
+        cats_hashes_set.insert(hash_value);
+        return false;
+    }
+    return true;
+}
+
+std::string saveImage(std::string file_name, std::string data)
+{
+    std::ofstream outfile(file_name, std::ios::binary);
+    if (outfile.is_open())
+    {
+        outfile.write(data.c_str(), data.size());
+        outfile.close();
+
+        return file_name;
+    }
+}
+
+std::string downloadImage(std::string name)
 {
     try
     {
-        cpr::Response r = cpr::Get(cpr::Url{ENDPOINT_URL});
-
-        // checks if it was already saved
-        std::hash<std::string> hash_fn;
-        size_t hash_value = hash_fn(r.text);
-
-        if (mySet.find(hash_value) == mySet.end())
+        cpr::Response response;
+        do
         {
-            mySet.insert(hash_value);
-            std::cout << hash_value << " has been inserted into the set." << std::endl;
-        }
-        else
-        {
-            std::cout << hash_value << " already exists in the set" << std::endl;
-            return 0; // should be warn, not 0 and not 1
-        }
+            response = cpr::Get(cpr::Url{ENDPOINT_URL});
+        } while (isDuplicate(response.text));
 
-        auto mime_type = getMimeType(r.text);
+        std::string data = response.text;
+
+        auto mime_type = getMimeType(data);
         if (mime_type == "unknown")
         {
-            throw std::runtime_error("Unknown mime type: " + mime_type);
+            throw std::runtime_error("Unknown mime type");
         }
-        auto result_name = BASE_DIR + name + "." + mime_type;
 
-        std::ofstream outfile(result_name, std::ios::binary);
-        if (outfile.is_open())
-        {
-            outfile.write(r.text.c_str(), r.text.size());
-            outfile.close();
-            std::cout << "Image downloaded successfully" << std::endl;
-
-            return 0;
-        }
+        auto file_name = BASE_DIR + name + "." + mime_type;
+        return saveImage(file_name, data);
     }
     catch (const std::exception &e)
     {
-        std::cerr << "Something went wrong: " << e.what() << std::endl;
+        throw std::runtime_error("Something went wrong: " + std::string(e.what()));
+    }
+}
+
+int uploadArchive()
+{
+    std::ifstream file(ARCHIVE_NAME, std::ios::binary);
+    if (!file.is_open())
+    {
+        std::cerr << "Could not open archive file" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+
+    cpr::Response r = cpr::Post(
+        cpr::Url{ENDPOINT_URL},
+        cpr::Body{buffer.str()},
+        cpr::Header{{"Content-Type", "application/zip"}});
+
+    if (r.status_code == 200)
+    {
+        std::cout << "Archive uploaded successfully" << std::endl;
+        exit(EXIT_SUCCESS);
+    }
+    else
+    {
+        std::cerr << "Failed to upload zip archive: " << r.status_code << " - " << r.error.message << std::endl;
         exit(EXIT_FAILURE);
     }
 }
 
-int main()
+std::vector<std::string> downloadImagesAsync()
 {
-    auto dir_path = BASE_DIR;
-    fs::create_directory(dir_path);
-
-    //
-    std::vector<std::future<int>> futures; // return std::string names
+    std::vector<std::future<std::string>> futures;
     for (int i = 0; i < CATS_AMOUNT; i++)
     {
         futures.emplace_back(std::async(std::launch::async, downloadImage, std::to_string(i)));
     }
 
-    std::vector<int> imagePaths;
+    std::vector<std::string> image_paths;
     for (auto &f : futures)
     {
-        imagePaths.push_back(f.get());
-    }
-    // todo: std::names and use above instead of image_paths
-
-    std::vector<fs::path> image_paths;
-
-    for (const auto &entry : fs::directory_iterator(dir_path))
-    {
-        image_paths.push_back(entry.path());
+        image_paths.push_back(f.get());
     }
 
-    std::string archive_path = "kotichi_archive.zip";
+    return image_paths;
+}
 
+int archiveImagesZip(std::vector<std::string> &image_paths)
+{
     try
     {
-        zip_t *zip_file = zip_open(archive_path.c_str(), ZIP_CREATE, NULL);
+        zip_t *zip_file = zip_open(ARCHIVE_NAME, ZIP_CREATE, NULL);
         if (!zip_file)
         {
-            std::cerr << "Error: Failed to create ZIP archive." << std::endl;
-            return 1;
+            std::cerr << "Failed to create zip archive" << std::endl;
+            exit(EXIT_FAILURE);
         }
 
-        // Add images to the archive
         for (const auto &image_path : image_paths)
         {
-            auto src = zip_source_file(zip_file, image_path.string().c_str(), 0, 0);
-            if (zip_file_add(zip_file, image_path.string().c_str(), src, 0) < 0)
+            auto src = zip_source_file(zip_file, image_path.c_str(), 0, 0);
+            if (zip_file_add(zip_file, image_path.c_str(), src, 0) < 0)
             {
                 zip_source_free(src);
-                throw std::runtime_error("Failed to add file to zip: " + std::string(zip_strerror(zip_file)));
+                throw std::runtime_error("Failed to add file to zip archive: " + std::string(zip_strerror(zip_file)));
             }
         }
 
@@ -151,35 +179,24 @@ int main()
     catch (const std::exception &e)
     {
         std::cerr << "Error creating archive: " << e.what() << std::endl;
-        return 1;
+        exit(EXIT_FAILURE);
     }
 
-    std::cout << "Archive created successfully: " << archive_path << std::endl;
-
-    std::ifstream file(archive_path, std::ios::binary);
-    if (!file.is_open())
-    {
-        std::cerr << "Error: Could not open archive file." << std::endl;
-        return 1;
-    }
-
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-
-    // Create the POST request
-    cpr::Response r = cpr::Post(
-        cpr::Url{ENDPOINT_URL},
-        cpr::Body{buffer.str()},
-        cpr::Header{{"Content-Type", "application/zip"}});
-
-    if (r.status_code == 200)
-    {
-        std::cout << "Archive uploaded successfully." << std::endl;
-    }
-    else
-    {
-        std::cerr << "Error uploading archive: " << r.status_code << " - " << r.error.message << std::endl;
-    }
+    std::cout << "Archive has been created successfully: " << ARCHIVE_NAME << std::endl;
 
     return 0;
+}
+
+// todo: add endpoint url as a parameter
+int main()
+{
+    auto dir_path = BASE_DIR;
+    fs::create_directory(dir_path);
+
+    auto image_paths = downloadImagesAsync();
+
+    archiveImagesZip(image_paths);
+    uploadArchive();
+
+    exit(EXIT_SUCCESS);
 }
